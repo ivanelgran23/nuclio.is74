@@ -38,6 +38,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type Kaniko struct {
@@ -249,7 +250,6 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 		fmt.Sprintf("--context=%s", buildOptions.ContextDir),
 		fmt.Sprintf("--destination=%s", common.CompileImageName(buildOptions.RegistryURL, buildOptions.Image)),
 		fmt.Sprintf("--push-retry=%d", k.builderConfiguration.PushImagesRetries),
-		fmt.Sprintf("--image-fs-extract-retry=%d", k.builderConfiguration.ImageFSExtractionRetries),
 	}
 
 	if !buildOptions.NoCache {
@@ -303,6 +303,16 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 							ImagePullPolicy: v1.PullPolicy(k.builderConfiguration.KanikoImagePullPolicy),
 							Args:            buildArgs,
 							VolumeMounts:    []v1.VolumeMount{tmpFolderVolumeMount},
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("250M"),
+									v1.ResourceCPU:    resource.MustParse("1000m"),
+								},
+								Limits: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("1500M"),
+									v1.ResourceCPU:    resource.MustParse("2000m"),
+								},
+							},
 						},
 					},
 					InitContainers: []v1.Container{
@@ -318,6 +328,16 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 								getAssetCommand,
 							},
 							VolumeMounts: []v1.VolumeMount{tmpFolderVolumeMount},
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("250M"),
+									v1.ResourceCPU:    resource.MustParse("1000m"),
+								},
+								Limits: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("1500M"),
+									v1.ResourceCPU:    resource.MustParse("2000m"),
+								},
+							},
 						},
 						{
 							Name:            "extract-bundle",
@@ -331,6 +351,16 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 								"/",
 							},
 							VolumeMounts: []v1.VolumeMount{tmpFolderVolumeMount},
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("250M"),
+									v1.ResourceCPU:    resource.MustParse("1000m"),
+								},
+								Limits: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("1500M"),
+									v1.ResourceCPU:    resource.MustParse("2000m"),
+								},
+							},
 						},
 					},
 					Volumes: []v1.Volume{

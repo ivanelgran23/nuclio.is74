@@ -532,7 +532,7 @@ func (b *Builder) validateAndEnrichConfiguration() error {
 
 	splitProcessorImageName := strings.Split(b.processorImage.imageName, ":")
 	if len(splitProcessorImageName) == 2 {
-		b.processorImage.imageTag = splitProcessorImageName[1]
+		b.processorImage.imageTag = "1.0-dev"
 		b.processorImage.imageName = splitProcessorImageName[0]
 	}
 
@@ -1055,13 +1055,16 @@ func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 		return "", errors.Wrap(err, "Failed to create processor dockerfile")
 	}
 
-	taggedImageName := fmt.Sprintf("%s:%s", b.processorImage.imageName, b.processorImage.imageTag)
+	taggedImageName := fmt.Sprintf("%s:1.0-dev", b.processorImage.imageName)
 	registryURL := b.options.FunctionConfig.Spec.Build.Registry
+	// kubeSecretName := b.options.FunctionConfig.Spec.ImagePullSecrets
+	kubeSecretName := "registry-secret-ml"
 
 	b.logger.InfoWithCtx(ctx,
 		"Building processor image",
 		"registryURL", registryURL,
-		"taggedImageName", taggedImageName)
+		"taggedImageName", taggedImageName,
+		"kubeSecretName", kubeSecretName)
 
 	err = b.platform.BuildAndPushContainerImage(ctx,
 		&containerimagebuilderpusher.BuildOptions{
@@ -1078,7 +1081,7 @@ func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 			BuildArgs:           buildArgs,
 			RegistryURL:         registryURL,
 			RepoName:            b.resolveRepoName(registryURL),
-			SecretName:          b.options.FunctionConfig.Spec.ImagePullSecrets,
+			SecretName:          kubeSecretName,
 			OutputImageFile:     b.options.OutputImageFile,
 			BuildTimeoutSeconds: b.resolveBuildTimeoutSeconds(),
 

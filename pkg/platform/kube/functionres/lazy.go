@@ -179,8 +179,8 @@ func (lc *lazyClient) CreateOrUpdate(ctx context.Context,
 
 	// TODO: remove when versioning is back in
 	function.Spec.Version = -1
-	function.Spec.Alias = "latest"
-	functionLabels["nuclio.io/function-version"] = "latest"
+	function.Spec.Alias = "1.0-dev"
+	functionLabels["nuclio.io/function-version"] = "1.0-dev"
 
 	resources := lazyResources{}
 
@@ -931,9 +931,11 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 		return (resource).(*appsv1.Deployment).ObjectMeta.DeletionTimestamp != nil
 	}
 
-	if function.Spec.ImagePullSecrets != "" {
-		imagePullSecrets = function.Spec.ImagePullSecrets
-	}
+	// if function.Spec.ImagePullSecrets != "" {
+	// 	imagePullSecrets = function.Spec.ImagePullSecrets
+	// }
+
+	imagePullSecrets = "registry-secret-ml"
 
 	createDeployment := func() (interface{}, error) {
 		method := createDeploymentResourceMethod
@@ -972,10 +974,9 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 		}
 
 		// apply when provided
-		if imagePullSecrets != "" {
-			deploymentSpec.Template.Spec.ImagePullSecrets = []v1.LocalObjectReference{
-				{Name: imagePullSecrets},
-			}
+		
+		deploymentSpec.Template.Spec.ImagePullSecrets = []v1.LocalObjectReference{
+			{Name: "registry-secret-ml"},
 		}
 
 		deployment := &appsv1.Deployment{
@@ -1047,10 +1048,8 @@ func (lc *lazyClient) createOrUpdateDeployment(ctx context.Context,
 		deployment.Spec.Template.Spec.PreemptionPolicy = function.Spec.PreemptionPolicy
 
 		// apply when provided
-		if imagePullSecrets != "" {
-			deployment.Spec.Template.Spec.ImagePullSecrets = []v1.LocalObjectReference{
-				{Name: imagePullSecrets},
-			}
+		deployment.Spec.Template.Spec.ImagePullSecrets = []v1.LocalObjectReference{
+			{Name: "registry-secret-ml"},
 		}
 
 		// enrich deployment spec with default fields that were passed inside the platform configuration
@@ -2167,7 +2166,7 @@ func (lc *lazyClient) getFunctionVolumeAndMounts(ctx context.Context,
 	var filteredFunctionVolumes []functionconfig.Volume
 
 	processorConfigVolumeName := "processor-config-volume"
-	platformConfigVolumeName := "platform-config-volume"
+	platformConfigVolumeName := "platform-config-volumeeee"
 
 	// processor configuration
 	processorConfigVolume := functionconfig.Volume{}
@@ -2269,6 +2268,11 @@ func (lc *lazyClient) getFunctionVolumeAndMounts(ctx context.Context,
 	// volume the function secret as optional
 	secretVolumeName := "function-secret"
 	secretName, err := lc.getFunctionSecretName(ctx, function)
+
+	lc.logger.InfoWithCtx(ctx,
+		"Function secret found - ",
+		secretName)
+
 	if err != nil {
 
 		// if the function doesn't have a secret, it's ok
@@ -2296,6 +2300,28 @@ func (lc *lazyClient) getFunctionVolumeAndMounts(ctx context.Context,
 			ReadOnly:  true,
 		})
 	}
+
+	// добавляем registry secret
+	volumeNameToVolume["docker-config"] = v1.Volume{
+		Name: "docker-config",
+		VolumeSource: v1.VolumeSource{
+			Secret: &v1.SecretVolumeSource{
+				SecretName: "registry-secret-ml",
+				Items: []v1.KeyToPath{
+					{
+						Key:  ".dockerconfigjson",
+						Path: "config.json",
+					},
+				},
+			},
+		},
+	}
+
+	volumeNameToVolumeMounts["docker-config"] = append(volumeNameToVolumeMounts["docker-config"], v1.VolumeMount{
+		Name:      "docker-config",
+		MountPath: "/kaniko/.docker",
+		ReadOnly:  true,
+	})
 
 	for _, volume := range volumeNameToVolume {
 		volumes = append(volumes, volume)
