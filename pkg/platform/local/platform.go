@@ -45,11 +45,11 @@ import (
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
 
-	"github.com/ghodss/yaml"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/nuclio-sdk-go"
-	"github.com/nuclio/zap"
+	nucliozap "github.com/nuclio/zap"
+	"sigs.k8s.io/yaml"
 )
 
 type Platform struct {
@@ -818,6 +818,10 @@ func (p *Platform) GetFunctionSecretData(ctx context.Context, functionName, func
 	return nil, nil
 }
 
+func (p *Platform) InitializeContainerBuilder() error {
+	return nil
+}
+
 func (p *Platform) deployFunction(createFunctionOptions *platform.CreateFunctionOptions,
 	previousHTTPPort int) (*platform.CreateFunctionResult, error) {
 
@@ -853,6 +857,9 @@ func (p *Platform) deployFunction(createFunctionOptions *platform.CreateFunction
 		gpus = "all"
 	}
 
+	cpus := p.resolveFunctionSpecRequestCPUs(createFunctionOptions.FunctionConfig.Spec)
+	memory := p.resolveFunctionSpecRequestMemory(createFunctionOptions.FunctionConfig.Spec)
+
 	functionSecurityContext := createFunctionOptions.FunctionConfig.Spec.SecurityContext
 
 	// run the docker image
@@ -866,10 +873,13 @@ func (p *Platform) deployFunction(createFunctionOptions *platform.CreateFunction
 		Network:       network,
 		RestartPolicy: restartPolicy,
 		GPUs:          gpus,
+		CPUs:          cpus,
+		Memory:        memory,
 		MountPoints:   mountPoints,
 		RunAsUser:     functionSecurityContext.RunAsUser,
 		RunAsGroup:    functionSecurityContext.RunAsGroup,
 		FSGroup:       functionSecurityContext.FSGroup,
+		Devices:       createFunctionOptions.FunctionConfig.Spec.Devices,
 	}
 
 	containerID := p.GetFunctionContainerName(&createFunctionOptions.FunctionConfig)
@@ -1322,4 +1332,28 @@ func (p *Platform) resolveFunctionRestartPolicy(createFunctionOptions *platform.
 	}
 
 	return p.Config.Local.DefaultFunctionRestartPolicy, nil
+}
+
+func (p *Platform) resolveFunctionSpecRequestCPUs(functionSpec functionconfig.Spec) string {
+	if functionSpec.Resources.Limits.Cpu().MilliValue() > 0 {
+
+		// format float to string, trim trailing zeros (e.g.: 0.100000 -> 0.1)
+		cpus := strings.TrimRight(
+			fmt.Sprintf("%f", functionSpec.Resources.Limits.Cpu().AsApproximateFloat64()),
+			"0")
+		if strings.HasSuffix(cpus, ".") {
+			cpus += "0"
+		}
+		return cpus
+	}
+	return ""
+}
+
+func (p *Platform) resolveFunctionSpecRequestMemory(functionSpec functionconfig.Spec) string {
+	if functionSpec.Resources.Limits.Memory().Value() > 0 {
+		return fmt.Sprintf("%db",
+			functionSpec.Resources.Limits.Memory().Value(),
+		)
+	}
+	return ""
 }

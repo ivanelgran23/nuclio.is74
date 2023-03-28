@@ -37,7 +37,7 @@ import (
 	"github.com/nuclio/zap"
 	"github.com/stretchr/testify/suite"
 	appsv1 "k8s.io/api/apps/v1"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
@@ -214,6 +214,125 @@ func (suite *lazyTestSuite) TestEnrichIngressWithDefaultAnnotations() {
 
 		})
 	}
+}
+
+func (suite *lazyTestSuite) TestEnrichIngressTLS() {
+	sslRedirectAnnotation := "nginx.ingress.kubernetes.io/ssl-redirect"
+
+	for _, testCase := range []struct {
+		name              string
+		enableSSLRedirect bool
+		tlsSecret         string
+	}{
+		{
+			name:              "no-tls-secret-no-ssl-redirect",
+			enableSSLRedirect: false,
+			tlsSecret:         "",
+		},
+		{
+			name:              "no-tls-secret-ssl-redirect",
+			enableSSLRedirect: true,
+			tlsSecret:         "",
+		},
+		{
+			name:              "tls-secret-no-ssl-redirect",
+			enableSSLRedirect: false,
+			tlsSecret:         "my-tls-secret",
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			suite.client.SetPlatformConfigurationProvider(&mockedPlatformConfigurationProvider{
+				platformConfiguration: &platformconfig.Config{
+					IngressConfig: platformconfig.IngressConfig{
+						TLSSecret:         testCase.tlsSecret,
+						EnableSSLRedirect: testCase.enableSSLRedirect,
+					},
+				},
+			})
+			host := "something.com"
+			one := 1
+			defaultHTTPTrigger := functionconfig.GetDefaultHTTPTrigger()
+			defaultHTTPTrigger.Attributes = map[string]interface{}{
+				"ingresses": map[string]interface{}{
+					"0": map[string]interface{}{
+						"host":  host,
+						"paths": []string{"/"},
+					},
+				},
+			}
+			function := nuclioio.NuclioFunction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-function" + testCase.name,
+				},
+				Spec: functionconfig.Spec{
+					Replicas: &one,
+					Triggers: map[string]functionconfig.Trigger{
+						defaultHTTPTrigger.Name: defaultHTTPTrigger,
+					},
+				},
+			}
+			functionLabels := suite.client.getFunctionLabels(&function)
+
+			ingressInstance, err := suite.client.createOrUpdateIngress(suite.ctx, functionLabels, &function)
+			suite.Require().NoError(err)
+			suite.Require().NotNil(ingressInstance)
+
+			if testCase.enableSSLRedirect {
+				suite.Require().Equal("true", ingressInstance.Annotations[sslRedirectAnnotation])
+			} else {
+				suite.Require().NotContains(ingressInstance.Annotations, sslRedirectAnnotation)
+			}
+			if testCase.tlsSecret != "" {
+				suite.Require().Equal(testCase.tlsSecret, ingressInstance.Spec.TLS[0].SecretName)
+				suite.Require().Equal(host, ingressInstance.Spec.TLS[0].Hosts[0])
+			} else {
+				suite.Require().Empty(ingressInstance.Spec.TLS)
+			}
+		})
+	}
+}
+
+func (suite *lazyTestSuite) TestEnrichIngressWithDefaultTLSSecret() {
+	tlsSecretName := "my-secret"
+	suite.client.SetPlatformConfigurationProvider(&mockedPlatformConfigurationProvider{
+		platformConfiguration: &platformconfig.Config{
+			IngressConfig: platformconfig.IngressConfig{
+				TLSSecret:         tlsSecretName,
+				EnableSSLRedirect: true,
+			},
+		},
+	})
+	one := 1
+	defaultHTTPTrigger := functionconfig.GetDefaultHTTPTrigger()
+	defaultHTTPTrigger.Attributes = map[string]interface{}{
+		"ingresses": map[string]interface{}{
+			"0": map[string]interface{}{
+				"host":  "something.com",
+				"paths": []string{"/"},
+			},
+		},
+	}
+	function := nuclioio.NuclioFunction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "my-function",
+		},
+		Spec: functionconfig.Spec{
+			Replicas: &one,
+			Triggers: map[string]functionconfig.Trigger{
+				defaultHTTPTrigger.Name: defaultHTTPTrigger,
+			},
+		},
+	}
+	// "create the ingress
+	ingressInstance, err := suite.client.createOrUpdateIngress(suite.ctx, map[string]string{}, &function)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(ingressInstance)
+
+	// make sure default TLS secret exists
+	sslRedirectAnnotation := "nginx.ingress.kubernetes.io/ssl-redirect"
+	suite.Require().Equal(ingressInstance.Spec.TLS[0].SecretName, tlsSecretName)
+	suite.Require().Contains(ingressInstance.Annotations, sslRedirectAnnotation)
+	suite.Require().Equal("true", ingressInstance.Annotations[sslRedirectAnnotation])
 }
 
 func (suite *lazyTestSuite) TestNoChanges() {
@@ -769,8 +888,13 @@ func (suite *lazyTestSuite) TestResolveAutoScaleMetricSpec() {
 			CustomScalingMetricSpecs: []autosv2.MetricSpec{
 				{
 					Pods: &autosv2.PodsMetricSource{
-						MetricName:         "another-custom-metric",
-						TargetAverageValue: podTargetValue,
+						Metric: autosv2.MetricIdentifier{
+							Name: "another-custom-metric",
+						},
+						Target: autosv2.MetricTarget{
+							Type:         autosv2.AverageValueMetricType,
+							AverageValue: &podTargetValue,
+						},
 					},
 				},
 			},
@@ -786,13 +910,15 @@ func (suite *lazyTestSuite) TestResolveAutoScaleMetricSpec() {
 	for _, metricSpec := range resolvedMetricSpec {
 		switch metricSpec.Type {
 		case autosv2.ResourceMetricSourceType:
-			suite.Require().Equal(*metricSpec.Resource.TargetAverageUtilization, int32(resourceTargetValue))
+
+			// TargetAverageUtilization
+			suite.Require().Equal(*metricSpec.Resource.Target.AverageUtilization, int32(resourceTargetValue))
 
 		case autosv2.ExternalMetricSourceType:
-			suite.Require().True(metricSpec.External.TargetValue.Equal(externalQuantity))
+			suite.Require().True(metricSpec.External.Target.Value.Equal(externalQuantity))
 
 		case autosv2.PodsMetricSourceType:
-			suite.Require().True(metricSpec.Pods.TargetAverageValue.Equal(podTargetValue))
+			suite.Require().True(metricSpec.Pods.Target.AverageValue.Equal(podTargetValue))
 		}
 	}
 }

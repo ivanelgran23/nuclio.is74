@@ -47,7 +47,7 @@ import (
 	"github.com/nuclio/logger"
 	"github.com/nuclio/nuclio-sdk-go"
 	"github.com/samber/lo"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
@@ -115,6 +115,12 @@ func (ap *Platform) GetConfig() *platformconfig.Config {
 func (ap *Platform) CreateFunctionBuild(ctx context.Context,
 	createFunctionBuildOptions *platform.CreateFunctionBuildOptions) (
 	*platform.CreateFunctionBuildResult, error) {
+
+	// ensure container builder is initialized (idempotent).
+	// it is called here as well for cases where this function was not called from the dashboard
+	if err := ap.platform.InitializeContainerBuilder(); err != nil {
+		return nil, errors.Wrap(err, "Failed to initialize container builder")
+	}
 
 	// execute a build
 	builder, err := build.NewBuilder(createFunctionBuildOptions.Logger, ap.platform, &common.AbstractS3Client{})
@@ -955,7 +961,10 @@ func (ap *Platform) GetDefaultRegistryCredentialsSecretName() string {
 
 // GetContainerBuilderKind returns the container-builder kind
 func (ap *Platform) GetContainerBuilderKind() string {
-	return ap.ContainerBuilder.GetKind()
+	if ap.ContainerBuilder != nil {
+		return ap.ContainerBuilder.GetKind()
+	}
+	return ap.GetConfig().ContainerBuilderConfiguration.Kind
 }
 
 // GetRuntimeBuildArgs returns the runtime specific build arguments

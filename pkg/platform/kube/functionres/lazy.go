@@ -42,7 +42,6 @@ import (
 	"github.com/nuclio/nuclio/pkg/processor/trigger/cron"
 	"github.com/nuclio/nuclio/pkg/processor/trigger/http"
 
-	"github.com/ghodss/yaml"
 	"github.com/imdario/mergo"
 	"github.com/mitchellh/mapstructure"
 	"github.com/nuclio/errors"
@@ -51,7 +50,7 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	appsv1 "k8s.io/api/apps/v1"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -62,6 +61,7 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -407,7 +407,7 @@ func (lc *lazyClient) Delete(ctx context.Context, namespace string, name string)
 
 	// Delete HPA if exists
 	hpaName := kube.HPANameFromFunctionName(name)
-	err = lc.kubeClientSet.AutoscalingV2beta1().HorizontalPodAutoscalers(namespace).Delete(ctx, hpaName, deleteOptions)
+	err = lc.kubeClientSet.AutoscalingV2().HorizontalPodAutoscalers(namespace).Delete(ctx, hpaName, deleteOptions)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return errors.Wrap(err, "Failed to delete HPA")
@@ -1196,7 +1196,7 @@ func (lc *lazyClient) createOrUpdateHorizontalPodAutoscaler(ctx context.Context,
 	}
 
 	getHorizontalPodAutoscaler := func() (interface{}, error) {
-		return lc.kubeClientSet.AutoscalingV2beta1().
+		return lc.kubeClientSet.AutoscalingV2().
 			HorizontalPodAutoscalers(function.Namespace).
 			Get(ctx, kube.HPANameFromFunctionName(function.Name), metav1.GetOptions{})
 	}
@@ -1226,14 +1226,17 @@ func (lc *lazyClient) createOrUpdateHorizontalPodAutoscaler(ctx context.Context,
 				MaxReplicas: maxReplicas,
 				Metrics:     metricSpecs,
 				ScaleTargetRef: autosv2.CrossVersionObjectReference{
-					APIVersion: "apps/apps_v1",
+					APIVersion: "apps/v1",
 					Kind:       "Deployment",
 					Name:       kube.DeploymentNameFromFunctionName(function.Name),
 				},
 			},
 		}
 
-		return lc.kubeClientSet.AutoscalingV2beta1().HorizontalPodAutoscalers(function.Namespace).Create(ctx, &hpa, metav1.CreateOptions{})
+		return lc.kubeClientSet.
+			AutoscalingV2().
+			HorizontalPodAutoscalers(function.Namespace).
+			Create(ctx, &hpa, metav1.CreateOptions{})
 	}
 
 	updateHorizontalPodAutoscaler := func(resourceToUpdate interface{}) (interface{}, error) {
@@ -1261,13 +1264,13 @@ func (lc *lazyClient) createOrUpdateHorizontalPodAutoscaler(ctx context.Context,
 				"functionName", function.Name,
 				"name", hpa.Name)
 
-			err := lc.kubeClientSet.AutoscalingV2beta1().
+			err := lc.kubeClientSet.AutoscalingV2().
 				HorizontalPodAutoscalers(function.Namespace).
 				Delete(ctx, hpa.Name, *deleteOptions)
 			return nil, err
 		}
 
-		return lc.kubeClientSet.AutoscalingV2beta1().HorizontalPodAutoscalers(function.Namespace).Update(ctx, hpa, metav1.UpdateOptions{})
+		return lc.kubeClientSet.AutoscalingV2().HorizontalPodAutoscalers(function.Namespace).Update(ctx, hpa, metav1.UpdateOptions{})
 	}
 
 	resource, err := lc.createOrUpdateResource(ctx,
@@ -1607,6 +1610,16 @@ func (lc *lazyClient) getFunctionEnvironment(functionLabels labels.Set,
 		},
 	})
 
+	// remove internal env vars from the function spec env
+	for _, internalEnvVar := range []v1.EnvVar{
+		{
+			Name:  common.RestoreConfigFromSecretEnvVar,
+			Value: "true",
+		},
+	} {
+		function.Spec.Env = common.RemoveEnvFromSlice(internalEnvVar, function.Spec.Env)
+	}
+
 	return env
 }
 
@@ -1925,10 +1938,9 @@ func (lc *lazyClient) populateIngressConfig(ctx context.Context,
 		function.Status.State != functionconfig.FunctionStateImported &&
 		function.GetComputedMinReplicas() == 0 &&
 		function.GetComputedMaxReplicas() > 0 {
-		platformConfiguration := lc.platformConfigurationProvider.GetPlatformConfiguration()
 
 		// enrich if not exists
-		for key, value := range platformConfiguration.ScaleToZero.HTTPTriggerIngressAnnotations {
+		for key, value := range platformConfig.ScaleToZero.HTTPTriggerIngressAnnotations {
 			if _, ok := meta.Annotations[key]; !ok {
 				meta.Annotations[key] = value
 			}
@@ -1944,12 +1956,22 @@ func (lc *lazyClient) populateIngressConfig(ctx context.Context,
 		}
 	}
 
+	if _, exists := meta.Annotations["nginx.ingress.kubernetes.io/ssl-redirect"]; !exists &&
+		platformConfig.IngressConfig.EnableSSLRedirect {
+		meta.Annotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "true"
+	}
+
 	// clear out existing so that we don't keep adding rules
 	spec.Rules = []networkingv1.IngressRule{}
 	spec.TLS = []networkingv1.IngressTLS{}
 
 	ingresses := functionconfig.GetFunctionIngresses(client.NuclioioToFunctionConfig(function))
 	for _, ingress := range ingresses {
+
+		if err := lc.enrichIngressWithDefaultValues(&ingress); err != nil {
+			return errors.Wrap(err, "Failed to enrich ingress with default values")
+		}
+
 		if err := lc.addIngressToSpec(ctx, &ingress, functionLabels, function, spec); err != nil {
 			return errors.Wrap(err, "Failed to add ingress to spec")
 		}
@@ -2286,6 +2308,10 @@ func (lc *lazyClient) getFunctionVolumeAndMounts(ctx context.Context,
 		}
 	}
 	if secretName != "" {
+		lc.logger.DebugWithCtx(ctx,
+			"Adding function secret volume",
+			"secretName", secretName,
+			"functionName", function.Name)
 		volumeNameToVolume[secretVolumeName] = v1.Volume{
 			Name: secretVolumeName,
 			VolumeSource: v1.VolumeSource{
@@ -2299,6 +2325,23 @@ func (lc *lazyClient) getFunctionVolumeAndMounts(ctx context.Context,
 			MountPath: functionconfig.FunctionSecretMountPath,
 			ReadOnly:  true,
 		})
+
+		// set an env var to tell the processor to restore the function config from the mounted secret
+		restoreFunctionConfigFromSecretEnvVar := v1.EnvVar{
+			Name:  common.RestoreConfigFromSecretEnvVar,
+			Value: "true",
+		}
+		if !common.EnvInSlice(restoreFunctionConfigFromSecretEnvVar, function.Spec.Env) {
+			function.Spec.Env = append(function.Spec.Env, restoreFunctionConfigFromSecretEnvVar)
+		} else {
+
+			// set the value to true
+			for envIndex, envVar := range function.Spec.Env {
+				if envVar.Name == restoreFunctionConfigFromSecretEnvVar.Name {
+					function.Spec.Env[envIndex].Value = restoreFunctionConfigFromSecretEnvVar.Value
+				}
+			}
+		}
 	}
 
 	// добавляем registry secret
@@ -2507,8 +2550,11 @@ func (lc *lazyClient) GetFunctionMetricSpecs(function *nuclioio.NuclioFunction) 
 				{
 					Type: "Resource",
 					Resource: &autosv2.ResourceMetricSource{
-						Name:               lc.getMetricResourceByName(platformConfig.AutoScale.MetricName),
-						TargetAverageValue: &targetValue,
+						Name: lc.getMetricResourceByName(platformConfig.AutoScale.MetricName),
+						Target: autosv2.MetricTarget{
+							Type:         autosv2.AverageValueMetricType,
+							AverageValue: &targetValue,
+						},
 					},
 				},
 			}
@@ -2517,8 +2563,13 @@ func (lc *lazyClient) GetFunctionMetricSpecs(function *nuclioio.NuclioFunction) 
 				{
 					Type: "Pods",
 					Pods: &autosv2.PodsMetricSource{
-						MetricName:         platformConfig.AutoScale.MetricName,
-						TargetAverageValue: targetValue,
+						Metric: autosv2.MetricIdentifier{
+							Name: platformConfig.AutoScale.MetricName,
+						},
+						Target: autosv2.MetricTarget{
+							Type:         autosv2.AverageValueMetricType,
+							AverageValue: &targetValue,
+						},
 					},
 				},
 			}
@@ -2531,8 +2582,11 @@ func (lc *lazyClient) GetFunctionMetricSpecs(function *nuclioio.NuclioFunction) 
 		metricSpecs = append(metricSpecs, autosv2.MetricSpec{
 			Type: "Resource",
 			Resource: &autosv2.ResourceMetricSource{
-				Name:                     v1.ResourceCPU,
-				TargetAverageUtilization: &targetCPU,
+				Name: v1.ResourceCPU,
+				Target: autosv2.MetricTarget{
+					Type:               autosv2.UtilizationMetricType,
+					AverageUtilization: &targetCPU,
+				},
 			},
 		})
 	}
@@ -2565,8 +2619,11 @@ func (lc *lazyClient) generateMetricSpecFromAutoScaleMetrics(autoScaleMetrics []
 			metricSpec = autosv2.MetricSpec{
 				Type: autoscaleMetric.SourceType,
 				Resource: &autosv2.ResourceMetricSource{
-					Name:                     v1.ResourceName(autoscaleMetric.MetricName),
-					TargetAverageUtilization: &targetAverageUtilization,
+					Name: v1.ResourceName(autoscaleMetric.MetricName),
+					Target: autosv2.MetricTarget{
+						Type:               autosv2.UtilizationMetricType,
+						AverageUtilization: &targetAverageUtilization,
+					},
 				},
 			}
 		case autosv2.PodsMetricSourceType:
@@ -2577,8 +2634,13 @@ func (lc *lazyClient) generateMetricSpecFromAutoScaleMetrics(autoScaleMetrics []
 			metricSpec = autosv2.MetricSpec{
 				Type: autoscaleMetric.SourceType,
 				Pods: &autosv2.PodsMetricSource{
-					MetricName:         fmt.Sprintf("%s_per_%s", autoscaleMetric.MetricName, autoscaleMetric.WindowSize),
-					TargetAverageValue: quantity,
+					Metric: autosv2.MetricIdentifier{
+						Name: fmt.Sprintf("%s_per_%s", autoscaleMetric.MetricName, autoscaleMetric.WindowSize),
+					},
+					Target: autosv2.MetricTarget{
+						Type:         autosv2.AverageValueMetricType,
+						AverageValue: &quantity,
+					},
 				},
 			}
 
@@ -2590,8 +2652,13 @@ func (lc *lazyClient) generateMetricSpecFromAutoScaleMetrics(autoScaleMetrics []
 			metricSpec = autosv2.MetricSpec{
 				Type: autoscaleMetric.SourceType,
 				External: &autosv2.ExternalMetricSource{
-					MetricName:  fmt.Sprintf("%s_per_%s", autoscaleMetric.MetricName, autoscaleMetric.WindowSize),
-					TargetValue: &quantity,
+					Metric: autosv2.MetricIdentifier{
+						Name: fmt.Sprintf("%s_per_%s", autoscaleMetric.MetricName, autoscaleMetric.WindowSize),
+					},
+					Target: autosv2.MetricTarget{
+						Type:  autosv2.ValueMetricType,
+						Value: &quantity,
+					},
 				},
 			}
 		default:
@@ -2744,6 +2811,19 @@ func (lc *lazyClient) isPodAutoScaledUp(ctx context.Context, pod v1.Pod) (bool, 
 		}
 	}
 	return false, nil
+}
+
+func (lc *lazyClient) enrichIngressWithDefaultValues(ingress *functionconfig.Ingress) error {
+
+	platformConfig := lc.platformConfigurationProvider.GetPlatformConfiguration()
+
+	// enrich with default ingress tls if exists
+	if ingress.TLS.SecretName == "" && platformConfig.IngressConfig.TLSSecret != "" {
+		ingress.TLS.Hosts = []string{ingress.Host}
+		ingress.TLS.SecretName = platformConfig.IngressConfig.TLSSecret
+	}
+
+	return nil
 }
 
 //
