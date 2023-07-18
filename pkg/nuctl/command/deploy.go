@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,9 +22,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
+	"github.com/nuclio/nuclio/pkg/errgroup"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	nuctlcommon "github.com/nuclio/nuclio/pkg/nuctl/command/common"
 	"github.com/nuclio/nuclio/pkg/platform"
@@ -79,12 +82,28 @@ type deployCommandeer struct {
 	runAsGroup                      int64
 	fsGroup                         int64
 	overrideHTTPTriggerServiceType  string
+
+	// beta - api client
+	betaCommandeer         *betaCommandeer
+	noBuild                bool
+	deployAll              bool
+	waitForFunction        bool
+	outputManifest         *nuctlcommon.PatchOutputManifest
+	excludedProjects       []string
+	excludedFunctions      []string
+	excludeFunctionWithGPU bool
+	importedOnly           bool
 }
 
-func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *deployCommandeer {
+func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer, betaCommandeer *betaCommandeer) *deployCommandeer {
 	commandeer := &deployCommandeer{
 		rootCommandeer: rootCommandeer,
 		functionConfig: *functionconfig.NewConfig(),
+		outputManifest: nuctlcommon.NewOutputManifest(),
+	}
+
+	if betaCommandeer != nil {
+		commandeer.betaCommandeer = betaCommandeer
 	}
 
 	cmd := &cobra.Command{
@@ -96,6 +115,19 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 			// initialize root
 			if err := rootCommandeer.initialize(); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
+			}
+
+			if commandeer.betaCommandeer != nil {
+				if err := commandeer.betaCommandeer.initialize(); err != nil {
+					return errors.Wrap(err, "Failed to initialize beta commandeer")
+				}
+				commandeer.rootCommandeer.loggerInstance.Debug("In BETA mode")
+				if commandeer.noBuild {
+					if err := commandeer.betaDeploy(ctx, args); err != nil {
+						return errors.Wrap(err, "Failed to deploy function")
+					}
+					return nil
+				}
 			}
 
 			var importedFunction platform.Function
@@ -147,20 +179,15 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 			// Populate HTTP Service type
 			commandeer.populateHTTPServiceType()
 
-			// Override basic fields from the config
-			commandeer.functionConfig.Meta.Name = commandeer.functionName
-			commandeer.functionConfig.Meta.Namespace = rootCommandeer.namespace
-
-			commandeer.functionConfig.Spec.Build = commandeer.functionBuild
-			commandeer.functionConfig.Spec.Build.Commands = commandeer.commands
-			commandeer.functionConfig.Spec.Build.FunctionConfigPath = commandeer.functionConfigPath
-
 			// Enrich function config with args
+			if err := commandeer.enrichConfigMetadata(rootCommandeer); err != nil {
+				return errors.Wrap(err, "Failed overriding basic config fields")
+			}
 			commandeer.enrichConfigWithStringArgs()
 			commandeer.enrichConfigWithIntArgs()
 			commandeer.enrichConfigWithBoolArgs()
-			err = commandeer.enrichConfigWithComplexArgs()
-			if err != nil {
+			commandeer.enrichBuildConfigWithArgs()
+			if err = commandeer.enrichConfigWithComplexArgs(); err != nil {
 				return errors.Wrap(err, "Failed config with complex args")
 			}
 
@@ -230,6 +257,20 @@ func addDeployFlags(cmd *cobra.Command,
 	cmd.Flags().Var(&commandeer.resourceLimits, "resource-limit", "Resource restrictions of the format '<resource name>=<quantity>' (for example, 'cpu=3')")
 	cmd.Flags().Var(&commandeer.resourceRequests, "resource-request", "Requested resources of the format '<resource name>=<quantity>' (for example, 'cpu=3')")
 	cmd.Flags().StringVar(&commandeer.loggerLevel, "logger-level", "", "One of debug, info, warn, error. By default, uses platform configuration")
+
+	addBetaDeployFlags(cmd, commandeer)
+}
+
+func addBetaDeployFlags(cmd *cobra.Command,
+	commandeer *deployCommandeer) {
+
+	cmd.Flags().BoolVar(&commandeer.noBuild, "no-build", false, "Don't build the function, only deploy it")
+	cmd.Flags().BoolVar(&commandeer.deployAll, "deploy-all", false, "Deploy all functions in the namespace")
+	cmd.PersistentFlags().BoolVarP(&commandeer.waitForFunction, "wait", "w", false, "Wait for function deployment to complete")
+	cmd.PersistentFlags().StringSliceVar(&commandeer.excludedProjects, "exclude-projects", []string{}, "Exclude projects to patch")
+	cmd.PersistentFlags().StringSliceVar(&commandeer.excludedFunctions, "exclude-functions", []string{}, "Exclude functions to patch")
+	cmd.PersistentFlags().BoolVar(&commandeer.excludeFunctionWithGPU, "exclude-functions-with-gpu", false, "Skip functions with GPU")
+	cmd.PersistentFlags().BoolVar(&commandeer.importedOnly, "imported-only", false, "Deploy only imported functions")
 }
 
 func parseResourceAllocations(values stringSliceFlag, resources *v1.ResourceList) error {
@@ -369,6 +410,25 @@ func (d *deployCommandeer) populateHTTPServiceType() {
 	if overridingHTTPServiceType != "" {
 		d.rootCommandeer.platformConfiguration.Kube.DefaultServiceType = overridingHTTPServiceType
 	}
+}
+
+// enrichConfigMetadata overrides metadata fields in the function config with the values from the commandeer,
+// if they are given explicitly
+func (d *deployCommandeer) enrichConfigMetadata(rootCommandeer *RootCommandeer) error {
+
+	functionName, err := d.resolveFunctionName()
+	if err != nil {
+		return errors.Wrap(err, "Failed to resolve function name")
+	}
+
+	// set the resolved function name
+	d.functionConfig.Meta.Name = functionName
+	d.functionName = functionName
+
+	// override the namespace in the config with the namespace from the command line (must be set)
+	d.functionConfig.Meta.Namespace = rootCommandeer.namespace
+
+	return nil
 }
 
 func (d *deployCommandeer) enrichConfigWithStringArgs() {
@@ -589,4 +649,240 @@ func (d *deployCommandeer) enrichConfigWithComplexArgs() error {
 	}
 
 	return nil
+}
+
+func (d *deployCommandeer) enrichBuildConfigWithArgs() {
+
+	// enrich string fields in function config with flags
+	common.PopulateFieldsFromValues(map[*string]string{
+		&d.functionConfig.Spec.Build.FunctionConfigPath: d.functionConfigPath,
+		&d.functionConfig.Spec.Build.Path:               d.functionBuild.Path,
+		&d.functionConfig.Spec.Build.FunctionSourceCode: d.functionBuild.FunctionSourceCode,
+		&d.functionConfig.Spec.Build.Image:              d.functionBuild.Image,
+		&d.functionConfig.Spec.Build.Registry:           d.functionBuild.Registry,
+		&d.functionConfig.Spec.Build.BaseImage:          d.functionBuild.BaseImage,
+		&d.functionConfig.Spec.Build.OnbuildImage:       d.functionBuild.OnbuildImage,
+		&d.functionConfig.Spec.Build.CodeEntryType:      d.functionBuild.CodeEntryType,
+	})
+
+	// enrich bool fields in function config with flags
+	common.PopulateFieldsFromValues(map[*bool]bool{
+		&d.functionConfig.Spec.Build.NoBaseImagesPull: d.functionBuild.NoBaseImagesPull,
+		&d.functionConfig.Spec.Build.NoCleanup:        d.functionBuild.NoCleanup,
+		&d.functionConfig.Spec.Build.Offline:          d.functionBuild.Offline,
+	})
+
+	// enrich build commands
+	if len(d.commands) > 0 {
+		d.functionConfig.Spec.Build.Commands = d.commands
+	}
+}
+
+func (d *deployCommandeer) betaDeploy(ctx context.Context, args []string) error {
+
+	if len(args) == 0 {
+
+		// redeploy all functions in the namespace
+		if err := d.redeployAllFunctions(ctx); err != nil {
+			return errors.Wrap(err, "Failed to redeploy all functions")
+		}
+	} else {
+
+		// redeploy the given functions
+		if err := d.redeployFunctions(ctx, args); err != nil {
+			return errors.Wrap(err, "Failed to redeploy functions")
+		}
+	}
+
+	return nil
+}
+
+func (d *deployCommandeer) redeployAllFunctions(ctx context.Context) error {
+	d.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Redeploying all functions")
+
+	// get function names to redeploy
+	functionNames, err := d.getFunctionNames(ctx)
+	if err != nil {
+		return errors.Wrap(err, "Failed to get functions")
+	}
+
+	return d.redeployFunctions(ctx, functionNames)
+}
+
+func (d *deployCommandeer) getFunctionNames(ctx context.Context) ([]string, error) {
+	d.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Getting function names")
+
+	functionConfigs, err := d.betaCommandeer.apiClient.GetFunctions(ctx, d.rootCommandeer.namespace)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to get functions")
+	}
+
+	functionNames := make([]string, 0)
+	for functionName, functionConfig := range functionConfigs {
+
+		// filter excluded functions
+		if d.shouldSkipFunction(functionConfig) {
+			d.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Excluding function", "function", functionName)
+			d.outputManifest.AddSkipped(functionName)
+			continue
+		}
+		functionNames = append(functionNames, functionName)
+	}
+
+	return functionNames, nil
+}
+
+func (d *deployCommandeer) redeployFunctions(ctx context.Context, functionNames []string) error {
+	d.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Redeploying functions", "functionNames", functionNames)
+
+	patchErrGroup, _ := errgroup.WithContextSemaphore(ctx, d.rootCommandeer.loggerInstance, uint(d.betaCommandeer.concurrency))
+	for _, function := range functionNames {
+		function := function
+		patchErrGroup.Go("patch function", func() error {
+			if err := d.patchFunction(ctx, function); err != nil {
+				d.outputManifest.AddFailure(function, err)
+				return errors.Wrap(err, "Failed to patch function")
+			}
+			d.outputManifest.AddSuccess(function)
+			return nil
+		})
+	}
+
+	if err := patchErrGroup.Wait(); err != nil {
+
+		// Functions that failed to patch are included in the output manifest,
+		// so we don't need to fail the entire operation here
+		d.rootCommandeer.loggerInstance.WarnWithCtx(ctx, "Failed to patch functions", "err", err)
+	}
+
+	d.outputManifest.LogOutput(ctx, d.rootCommandeer.loggerInstance)
+
+	return nil
+}
+
+// patchFunction patches a single function
+func (d *deployCommandeer) patchFunction(ctx context.Context, function string) error {
+
+	d.rootCommandeer.loggerInstance.DebugWithCtx(ctx, "Redeploying function", "function", function)
+
+	// patch function
+	patchOptions := map[string]string{
+		"desiredState": "ready",
+	}
+
+	payload, err := json.Marshal(patchOptions)
+	if err != nil {
+		return errors.Wrap(err, "Failed to marshal payload")
+	}
+
+	requestHeaders := d.resolveRequestHeaders()
+
+	if err := d.betaCommandeer.apiClient.PatchFunction(ctx,
+		function,
+		d.rootCommandeer.namespace,
+		payload,
+		requestHeaders); err != nil {
+		return errors.Wrap(err, "Failed to patch function")
+	}
+
+	return nil
+}
+
+// shouldSkipFunction returns true if the function patch should be skipped
+func (d *deployCommandeer) shouldSkipFunction(functionConfig functionconfig.Config) bool {
+	functionName := functionConfig.Meta.Name
+	projectName := functionConfig.Meta.Labels[common.NuclioResourceLabelKeyProjectName]
+
+	// skip if function is excluded or if it has a positive GPU resource limit
+	if common.StringSliceContainsString(d.excludedFunctions, functionName) ||
+		common.StringSliceContainsString(d.excludedProjects, projectName) ||
+		(d.excludeFunctionWithGPU && functionConfig.Spec.PositiveGPUResourceLimit()) {
+		return true
+	}
+
+	return false
+}
+
+func (d *deployCommandeer) resolveRequestHeaders() map[string]string {
+	requestHeaders := map[string]string{}
+	if d.waitForFunction {
+
+		// add a header that will tell the API to wait for the function to be ready after patching
+		requestHeaders[headers.WaitFunctionAction] = "true"
+	}
+	if d.importedOnly {
+
+		// add a header that will tell the API to only deploy imported functions
+		requestHeaders[headers.ImportedFunctionOnly] = "true"
+	}
+	return requestHeaders
+}
+
+func (d *deployCommandeer) resolveFunctionName() (string, error) {
+	if d.functionName != "" {
+		return d.functionName, nil
+	}
+
+	// if function name is not provided, use the name from the config
+	if d.functionConfig.Meta.Name != "" {
+		return d.functionConfig.Meta.Name, nil
+	}
+
+	// if a path is provided, read the function config from the path and use the name from the config
+	if d.functionBuild.Path != "" {
+		functionName, err := d.resolveFunctionNameFromPath()
+		if err != nil {
+			return "", errors.Wrap(err, "Failed to resolve function name from path")
+		}
+		return functionName, nil
+	}
+
+	return "", errors.New("Function name is not provided")
+}
+
+func (d *deployCommandeer) resolveFunctionNameFromPath() (string, error) {
+
+	functionConfigPath := d.resolveFunctionConfigPath()
+	if functionConfigPath == "" {
+		return "", errors.New("Failed to resolve function config path")
+	}
+
+	config := &functionconfig.Config{}
+
+	functionconfigReader, err := functionconfig.NewReader(d.rootCommandeer.loggerInstance)
+	if err != nil {
+		return "", errors.Wrap(err, "Failed to create functionconfig reader")
+	}
+	if err := functionconfigReader.ReadFunctionConfigFile(functionConfigPath, config); err != nil {
+		return "", errors.Wrap(err, "Failed to read function configuration")
+	}
+
+	return config.Meta.Name, nil
+}
+
+func (d *deployCommandeer) resolveFunctionConfigPath() string {
+
+	// if the user provided a configuration path, use that
+	if d.functionBuild.FunctionConfigPath != "" {
+		return d.functionBuild.FunctionConfigPath
+	}
+
+	// if the path is a file, check if it is a yaml file
+	if common.IsFile(d.functionBuild.Path) {
+		cleanPath := filepath.Clean(d.functionBuild.Path)
+		if filepath.Ext(cleanPath) == ".yaml" || filepath.Ext(cleanPath) == ".yml" {
+			return cleanPath
+		}
+
+		// it's a file, but not a config file
+		return ""
+	}
+
+	functionConfigPath := filepath.Join(d.functionBuild.Path, common.FunctionConfigFileName)
+
+	if !common.FileExists(functionConfigPath) {
+		return ""
+	}
+
+	return functionConfigPath
 }

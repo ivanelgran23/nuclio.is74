@@ -5,6 +5,7 @@
   - [Workers and Worker Allocation modes](#workers)
   - [Multiple topics](#multiple-topics)
 - [Configuration parameters](#config-params)
+  - [Passing configuration via secrets](#configuration-via-secret)
 - [How a message travels through Nuclio to the handler](#message-course)
   - [Configuration parameters](#message-course-config-params)
 - [Offset management](#offset-management)
@@ -163,6 +164,24 @@ For more information on Nuclio function configuration, see the [function-configu
   <br/>
   **Default Value:** `"pool"`
 
+<a id="configuration-via-secret"></a>
+### Passing configuration via secrets
+
+Nuclio allows passing sensitive configuration values (such as Kafka credentials) via secrets.
+To do that, follow the following steps:
+1. Create a secret with the sensitive data (e.g. `access-key`)
+2. Mount the secret as a volume to the function (in `spec.Volumes`)
+3. Specify the path to the mounted values, either in the function's spec or in the function's annotations, with:
+    1. Either specify the full path in the spec/annotation (e.g. `nuclio.io/kafka-access-key = /path/to/secret/access-key`)
+    2. Or, add the secret mount path to the secretPath filed (or the nuclio.io/kafka-secret-path annotation), and the sub paths to the other annotations. Nuclio will resolve the full paths according to the existing annotations.
+e.g:
+```
+nuclio.io/kafka-secret-path = /etc/nuclio/kafka-secret
+nuclio.io/kafka-access-key = accessKey
+```
+
+The current configurations supported via secrets are: `accessKey`, `accessCertificate`, `caCert`, `SASL.OAuth.clientSecret`, `SASL.password`.
+
 <a id="message-course"></a>
 ## How a message travels through Nuclio to the handler
 
@@ -259,7 +278,7 @@ One example are stateful functions that might need to go and consume already bei
 For that, Nuclio offers a way to accept new events without committing them, and explicitly commit offsets of the partition, when the processing is done.
 This enables the function to receive and process more events simultaneously.
 
-To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enabled` or `explicitOnly`, where the optional modes are:
+To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enable` or `explicitOnly`, where the optional modes are:
 * `enable` - allows explicit and implicit ack according to the "x-nuclio-stream-no-ack" header
 * `disable`- disables the explicit ack feature and allows only implicit acks (default)
 * `explicitOnly`- allows only explicit acks and disables implicit acks
@@ -285,7 +304,7 @@ context.platform.on_signal(callback)
 ```
 
 **NOTES**:
-* Currently, the explicit ack feature is only available for python runtime and function that have a Kafka trigger.
+* Currently, the explicit ack feature is only available for python runtime and functions that have a stream trigger (kafka/v3io).
 * The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/kafka-worker-allocation-mode":"static"`.
 * The `QualifiedOffset` object can be saved in a persistent storage and used to commit the offset on later invocation of the function.
 * The call to the `explicit_ack()` method must be awaited, meaning the handler must be an async function, or provide an event loop to run that method. e.g.:

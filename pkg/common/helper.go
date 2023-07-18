@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -573,4 +573,15 @@ func RemoveStringSliceItemsFromStringSlice(slice []string, itemsToRemove []strin
 		}
 	}
 	return list
+}
+
+// PopulateFieldsFromValues populates fields with values if the value is not nil, according to the isNotNilFunc.
+// the given fieldsToValues map is a map of pointers to fields to populate and values.
+func PopulateFieldsFromValues[T string | bool | int](fieldsToValues map[*T]T) {
+	var zeroValue T
+	for field, value := range fieldsToValues {
+		if value != zeroValue {
+			*field = value
+		}
+	}
 }

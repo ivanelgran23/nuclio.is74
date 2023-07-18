@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -88,7 +88,7 @@ limitations under the License.
                 backendOptions: [
                     {
                         expirationTime: ConfigService.i18nextExpirationTime,
-                        defaultVersion: 'v0.4'
+                        defaultVersion: 'v0.5'
                     },
                     {
                         loadPath: 'assets/i18n/{{lng}}/{{ns}}.json',

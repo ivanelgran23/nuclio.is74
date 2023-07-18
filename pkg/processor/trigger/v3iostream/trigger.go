@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
 	"github.com/nuclio/nuclio/pkg/processor/controlcommunication"
@@ -230,6 +231,11 @@ func (vs *v3iostream) ConsumeClaim(session streamconsumergroup.Session, claim st
 
 	vs.Logger.DebugWith("Claim consumption stopped", "shardID", claim.GetShardID())
 
+	// unsubscribe channel from the streamAck control message kind before closing it
+	if err := vs.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
+		vs.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+	}
+
 	// shut down the event submitter and the explicit ack handler
 	close(submittedEventChan)
 	close(explicitAckControlMessageChan)
@@ -282,10 +288,14 @@ func (vs *v3iostream) eventSubmitter(claim streamconsumergroup.Claim, submittedE
 			// indicate that we're done
 			submittedEvent.done <- processErr
 
-		// also includes ExplicitAckModeExplicitOnly
+		case functionconfig.ExplicitAckModeExplicitOnly:
+
+			// we always return an error so the offset will only be marked by the explicit ack handler
+			submittedEvent.done <- processor.StreamNoAckError{}
 		default:
 
-			// ignore response
+			// we should not get here, but just in case
+			submittedEvent.done <- processErr
 		}
 	}
 
@@ -453,7 +463,7 @@ func (vs *v3iostream) resolveNoAckMessage(response interface{}, submittedEvent *
 	}
 
 	// check response header for no-ack
-	if noAckHeader, exists := responseHeaders["x-nuclio-stream-no-ack"]; exists {
+	if noAckHeader, exists := responseHeaders[headers.StreamNoAck]; exists {
 
 		// convert header to boolean
 		if noAckHeaderBool, ok := noAckHeader.(bool); ok && noAckHeaderBool {

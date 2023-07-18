@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,12 +20,6 @@ KUBECONFIG := $(if $(KUBECONFIG),$(KUBECONFIG),$(HOME)/.kube/config)
 # upstream repo
 NUCLIO_DOCKER_REPO ?= quay.io/nuclio
 NUCLIO_CACHE_REPO ?= ghcr.io/nuclio
-
-# dockerfile base image
-NUCLIO_BASE_IMAGE_NAME ?= gcr.io/iguazio/golang
-NUCLIO_BASE_IMAGE_TAG ?= 1.19
-NUCLIO_BASE_ALPINE_IMAGE_NAME ?= gcr.io/iguazio/golang
-NUCLIO_BASE_ALPINE_IMAGE_TAG ?= 1.19-alpine3.17
 
 # get default os / arch from go env
 NUCLIO_DEFAULT_OS := $(shell go env GOOS)
@@ -92,12 +86,24 @@ endif
 
 # alpine is commonly used by controller / dlx / autoscaler
 ifeq ($(NUCLIO_ARCH), armhf)
-	NUCLIO_DOCKER_ALPINE_IMAGE ?= gcr.io/iguazio/arm32v7/alpine:3.17
+	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/arm32v7/alpine:3.17
+	NUCLIO_BASE_IMAGE_NAME 			?= gcr.io/iguazio/arm32v7/golang
+	NUCLIO_DOCKER_JAVA_OPENJDK		?= gcr.io/iguazio/openjdk:11-slim
+	NODE_IMAGE_NAME 				?= gcr.io/iguazio/arm32v7/node:14.21
 else ifeq ($(NUCLIO_ARCH), arm64)
-	NUCLIO_DOCKER_ALPINE_IMAGE ?= gcr.io/iguazio/arm64v8/alpine:3.17
+	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/arm64v8/alpine:3.17
+	NUCLIO_BASE_IMAGE_NAME 			?= gcr.io/iguazio/arm64v8/golang
+	NUCLIO_DOCKER_JAVA_OPENJDK 		?= gcr.io/iguazio/arm64v8/openjdk:11-slim
+	NODE_IMAGE_NAME 				?= gcr.io/iguazio/arm64v8/node:14.21
 else
-	NUCLIO_DOCKER_ALPINE_IMAGE ?= gcr.io/iguazio/alpine:3.17
+	NUCLIO_DOCKER_ALPINE_IMAGE 		?= gcr.io/iguazio/alpine:3.17
+	NUCLIO_BASE_IMAGE_NAME 			?= gcr.io/iguazio/golang
+	NUCLIO_DOCKER_JAVA_OPENJDK		?= gcr.io/iguazio/openjdk:11-slim
+	NODE_IMAGE_NAME 				?= gcr.io/iguazio/node:14.21
 endif
+
+NUCLIO_BASE_IMAGE_TAG ?= 1.19
+NUCLIO_BASE_ALPINE_IMAGE_TAG ?= 1.19-alpine3.17
 
 #
 #  Must be first target
@@ -129,7 +135,7 @@ helm-publish:
 
 # tools get built with the specified OS/arch and inject version
 GO_BUILD_TOOL_WORKDIR = /nuclio
-GO_BUILD_NUCTL = go build -a -installsuffix cgo -ldflags="$(GO_LINK_FLAGS_INJECT_VERSION)"
+GO_BUILD_CMD = go build -ldflags="$(GO_LINK_FLAGS_INJECT_VERSION)"
 
 #
 # Rules
@@ -246,7 +252,7 @@ nuctl: ensure-gopath build-builder
 		--env GOOS=$(NUCLIO_OS) \
 		--env GOARCH=$(NUCLIO_ARCH) \
 		$(NUCLIO_DOCKER_REPO)/nuclio-builder:$(NUCLIO_DOCKER_IMAGE_TAG) \
-		$(GO_BUILD_NUCTL) -o /go/bin/$(NUCTL_BIN_NAME) cmd/nuctl/main.go
+		$(GO_BUILD_CMD) -o /go/bin/$(NUCTL_BIN_NAME) cmd/nuctl/main.go
 ifeq ($(NUCLIO_NUCTL_CREATE_SYMLINK), true)
 	@rm -f $(NUCTL_TARGET)
 	@ln -sF $(GOPATH)/bin/$(NUCTL_BIN_NAME) $(NUCTL_TARGET)
@@ -254,17 +260,25 @@ endif
 
 .PHONY: nuctl-bin
 nuctl-bin: ensure-gopath
-	CGO_ENABLED=0 $(GO_BUILD_NUCTL) -o $(NUCLIO_PATH)/$(NUCTL_BIN_NAME) cmd/nuctl/main.go
+	CGO_ENABLED=0 $(GO_BUILD_CMD) -o $(NUCLIO_PATH)/$(NUCTL_BIN_NAME) cmd/nuctl/main.go
 
 NUCLIO_DOCKER_PROCESSOR_IMAGE_NAME=$(NUCLIO_DOCKER_REPO)/processor:$(NUCLIO_DOCKER_IMAGE_TAG)
 NUCLIO_DOCKER_PROCESSOR_IMAGE_NAME_CACHE=$(NUCLIO_CACHE_REPO)/processor:$(NUCLIO_DOCKER_IMAGE_CACHE_TAG)
 
 .PHONY: processor
-processor: build-builder
+processor: modules
+
+	@# build processor locally
+	@# build its image and copy from host to image
+	@# this is done to avoid trying compiling the processor binary on the image
+	@# while using virtualization / emulation to match the desired architecture
+	@mkdir -p ./.bin
+	GOARCH=$(NUCLIO_ARCH) GOOS=linux CGO_ENABLED=0 $(GO_BUILD_CMD) \
+        -o ./.bin/processor-$(NUCLIO_ARCH) \
+        cmd/processor/main.go
+
 	docker build \
-		--build-arg NUCLIO_GO_LINK_FLAGS_INJECT_VERSION="$(GO_LINK_FLAGS_INJECT_VERSION)" \
-		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
-		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
+		--build-arg NUCLIO_ARCH=$(NUCLIO_ARCH) \
 		--build-arg BUILDKIT_INLINE_CACHE=1 \
 		--cache-from $(NUCLIO_DOCKER_PROCESSOR_IMAGE_NAME_CACHE) \
 		--file cmd/processor/Dockerfile \
@@ -325,6 +339,8 @@ dashboard: build-builder
 		--build-arg NGINX_IMAGE=$(NUCLIO_DOCKER_DASHBOARD_NGINX_BASE_IMAGE) \
 		--build-arg NUCLIO_DOCKER_ALPINE_IMAGE=$(NUCLIO_DOCKER_ALPINE_IMAGE) \
 		--build-arg NUCLIO_GO_LINK_FLAGS_INJECT_VERSION="$(GO_LINK_FLAGS_INJECT_VERSION)" \
+		--build-arg UHTTPC_ARCH="$(NUCLIO_DOCKER_DASHBOARD_UHTTPC_ARCH)" \
+		--build-arg NODE_IMAGE_NAME=$(NODE_IMAGE_NAME) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg BUILDKIT_INLINE_CACHE=1 \
@@ -398,7 +414,7 @@ NUCLIO_DOCKER_HANDLER_BUILDER_PYTHON_ONBUILD_IMAGE_NAME_CACHE=\
 PIP_REQUIRE_VIRTUALENV=false
 
 .PHONY: handler-builder-python-onbuild
-handler-builder-python-onbuild:
+handler-builder-python-onbuild: processor
 	docker build \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
@@ -429,8 +445,9 @@ NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME_CACHE=\
 .PHONY: handler-builder-golang-onbuild-alpine
 handler-builder-golang-onbuild-alpine: build-builder
 	docker build \
+		--build-arg NUCLIO_ARCH=$(NUCLIO_ARCH) \
 		--build-arg NUCLIO_GO_LINK_FLAGS_INJECT_VERSION="$(GO_LINK_FLAGS_INJECT_VERSION)" \
-		--build-arg NUCLIO_BASE_ALPINE_IMAGE_NAME=$(NUCLIO_BASE_ALPINE_IMAGE_NAME) \
+		--build-arg NUCLIO_BASE_IMAGE_NAME=$(NUCLIO_BASE_IMAGE_NAME) \
 		--build-arg NUCLIO_BASE_ALPINE_IMAGE_TAG=$(NUCLIO_BASE_ALPINE_IMAGE_TAG) \
 		--cache-from $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME_CACHE) \
 		--file pkg/processor/build/runtime/golang/docker/onbuild/Dockerfile.alpine \
@@ -439,8 +456,13 @@ handler-builder-golang-onbuild-alpine: build-builder
 		.
 
 .PHONY: handler-builder-golang-onbuild
-handler-builder-golang-onbuild: build-builder handler-builder-golang-onbuild-alpine
+handler-builder-golang-onbuild: build-builder
+ifndef SKIP_BUILD_GOLANG_ONBUILD_ALPINE
+handler-builder-golang-onbuild: handler-builder-golang-onbuild-alpine
+endif
+handler-builder-golang-onbuild:
 	docker build \
+		--build-arg NUCLIO_ARCH=$(NUCLIO_ARCH) \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg NUCLIO_GO_LINK_FLAGS_INJECT_VERSION="$(GO_LINK_FLAGS_INJECT_VERSION)" \
 		--build-arg NUCLIO_BASE_IMAGE_NAME=$(NUCLIO_BASE_IMAGE_NAME) \
@@ -453,19 +475,17 @@ handler-builder-golang-onbuild: build-builder handler-builder-golang-onbuild-alp
 		.
 
 ifneq ($(filter handler-builder-golang-onbuild,$(DOCKER_IMAGES_RULES)),)
-$(eval IMAGES_TO_PUSH += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_IMAGE_NAME))
-$(eval IMAGES_TO_PUSH += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME))
-$(eval DOCKER_IMAGES_CACHE += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_IMAGE_NAME_CACHE))
-$(eval DOCKER_IMAGES_CACHE += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME_CACHE))
+$(eval IMAGES_TO_PUSH 		+= $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_IMAGE_NAME))
+$(eval DOCKER_IMAGES_CACHE 	+= $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_IMAGE_NAME_CACHE))
+ifndef SKIP_BUILD_GOLANG_ONBUILD_ALPINE
+$(eval IMAGES_TO_PUSH 		+= $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME))
+$(eval DOCKER_IMAGES_CACHE	+= $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME_CACHE))
+endif
 endif
 
 ifneq ($(filter handler-builder-golang-onbuild-alpine,$(DOCKER_IMAGES_RULES)),)
 $(eval IMAGES_TO_PUSH += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME))
 $(eval DOCKER_IMAGES_CACHE += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME_CACHE))
-endif
-
-ifneq ($(filter handler-builder-golang-onbuild-alpine,$(DOCKER_IMAGES_RULES)),)
-$(eval IMAGES_TO_PUSH += $(NUCLIO_DOCKER_HANDLER_BUILDER_GOLANG_ONBUILD_ALPINE_IMAGE_NAME))
 endif
 
 # NodeJS
@@ -476,7 +496,7 @@ NUCLIO_DOCKER_HANDLER_BUILDER_NODEJS_ONBUILD_IMAGE_NAME_CACHE=\
  $(NUCLIO_CACHE_REPO)/handler-builder-nodejs-onbuild:$(NUCLIO_DOCKER_IMAGE_CACHE_TAG)
 
 .PHONY: handler-builder-nodejs-onbuild
-handler-builder-nodejs-onbuild:
+handler-builder-nodejs-onbuild: processor
 	docker build \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
@@ -499,7 +519,7 @@ NUCLIO_DOCKER_HANDLER_BUILDER_RUBY_ONBUILD_IMAGE_NAME_CACHE=\
  $(NUCLIO_CACHE_REPO)/handler-builder-ruby-onbuild:$(NUCLIO_DOCKER_IMAGE_CACHE_TAG)
 
 .PHONY: handler-builder-ruby-onbuild
-handler-builder-ruby-onbuild:
+handler-builder-ruby-onbuild: processor
 	docker build \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
@@ -545,10 +565,11 @@ NUCLIO_DOCKER_HANDLER_BUILDER_JAVA_ONBUILD_IMAGE_NAME_CACHE=\
  $(NUCLIO_CACHE_REPO)/handler-builder-java-onbuild:$(NUCLIO_DOCKER_IMAGE_CACHE_TAG)
 
 .PHONY: handler-builder-java-onbuild
-handler-builder-java-onbuild:
+handler-builder-java-onbuild: processor
 	docker build \
 		--build-arg NUCLIO_DOCKER_IMAGE_TAG=$(NUCLIO_DOCKER_IMAGE_TAG) \
 		--build-arg NUCLIO_DOCKER_REPO=$(NUCLIO_DOCKER_REPO) \
+		--build-arg NUCLIO_DOCKER_JAVA_OPENJDK=$(NUCLIO_DOCKER_JAVA_OPENJDK) \
 		--cache-from $(NUCLIO_DOCKER_HANDLER_BUILDER_JAVA_ONBUILD_IMAGE_NAME_CACHE) \
 		--file pkg/processor/build/runtime/java/docker/onbuild/Dockerfile \
 		--tag $(NUCLIO_DOCKER_HANDLER_BUILDER_JAVA_ONBUILD_IMAGE_NAME) \
@@ -810,7 +831,6 @@ endif
 
 .PHONY: modules
 modules: ensure-gopath
-	@echo Getting go modules
 	@go mod download
 
 .PHONY: targets

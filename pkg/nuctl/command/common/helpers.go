@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+
+	"github.com/nuclio/nuclio/pkg/functionconfig"
 
 	"github.com/nuclio/errors"
 	"sigs.k8s.io/yaml"
@@ -77,4 +79,22 @@ func GetUnmarshalFunc(bytes []byte) (func(data []byte, v interface{}) error, err
 	}
 
 	return nil, errors.New("Input is neither json nor yaml")
+}
+
+// ConvertMapToFunctionConfig converts a map to a function config
+func ConvertMapToFunctionConfig(functionMap map[string]interface{}) (functionconfig.Config, error) {
+	var functionConfig functionconfig.Config
+
+	// convert to json
+	functionConfigJSON, err := json.Marshal(functionMap)
+	if err != nil {
+		return functionConfig, errors.Wrap(err, "Failed to marshal function config")
+	}
+
+	// convert to function config
+	if err := json.Unmarshal(functionConfigJSON, &functionConfig); err != nil {
+		return functionConfig, errors.Wrap(err, "Failed to unmarshal function config")
+	}
+
+	return functionConfig, nil
 }

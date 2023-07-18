@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor/runtime"
+	"github.com/nuclio/nuclio/pkg/processor/util/partitionworker"
 	"github.com/nuclio/nuclio/pkg/processor/worker"
 
 	"github.com/nuclio/errors"
@@ -124,6 +125,37 @@ func (c *Configuration) ParseDurationOrDefault(durationConfigField *DurationConf
 	*durationConfigField.Field = parsedDurationValue
 
 	return nil
+}
+
+func (c *Configuration) PopulateExplicitAckMode(explicitAckModeValue string,
+	triggerConfigurationExplicitAckMode functionconfig.ExplicitAckMode) error {
+	switch explicitAckModeValue {
+	case string(functionconfig.ExplicitAckModeEnable):
+		c.ExplicitAckMode = functionconfig.ExplicitAckModeEnable
+	case string(functionconfig.ExplicitAckModeExplicitOnly):
+		c.ExplicitAckMode = functionconfig.ExplicitAckModeExplicitOnly
+	default:
+
+		// default explicit ack mode to 'disable'
+		if triggerConfigurationExplicitAckMode == "" {
+			c.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
+		}
+	}
+	return nil
+}
+
+func (c *Configuration) ResolveWorkerAllocationMode(modeFromAttributes, modeFromAnnotation partitionworker.AllocationMode) partitionworker.AllocationMode {
+
+	// prioritize attribute over annotation
+	if modeFromAttributes != "" {
+		return modeFromAttributes
+	}
+	if modeFromAnnotation != "" {
+		return modeFromAnnotation
+	}
+
+	// default to pool
+	return partitionworker.AllocationModePool
 }
 
 type Statistics struct {

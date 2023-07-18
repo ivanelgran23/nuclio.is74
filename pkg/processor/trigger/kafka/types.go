@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,10 +17,13 @@ limitations under the License.
 package kafka
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor/runtime"
 	"github.com/nuclio/nuclio/pkg/processor/trigger"
@@ -61,6 +64,8 @@ type Configuration struct {
 		InsecureSkipVerify bool
 		MinimumVersion     string
 	}
+
+	SecretPath string
 
 	SessionTimeout                string
 	HeartbeatInterval             string
@@ -108,6 +113,7 @@ func NewConfiguration(id string,
 	newConfiguration.Configuration = *trigger.NewConfiguration(id, triggerConfiguration, runtimeConfiguration)
 
 	workerAllocationModeValue := ""
+	explicitAckModeValue := ""
 
 	err := newConfiguration.PopulateConfigurationFromAnnotations([]trigger.AnnotationConfigField{
 		{Key: "nuclio.io/kafka-session-timeout", ValueString: &newConfiguration.SessionTimeout},
@@ -129,6 +135,7 @@ func NewConfiguration(id string,
 		{Key: "nuclio.io/kafka-access-cert", ValueString: &newConfiguration.AccessCertificate},
 		{Key: "nuclio.io/kafka-ca-cert", ValueString: &newConfiguration.CACert},
 		{Key: "nuclio.io/kafka-version", ValueString: &newConfiguration.Version},
+		{Key: "nuclio.io/kafka-secret-path", ValueString: &newConfiguration.SecretPath},
 
 		// deprecated. not in use anymore.
 		{Key: "nuclio.io/kafka-log-level", ValueInt: &newConfiguration.LogLevel},
@@ -156,23 +163,22 @@ func NewConfiguration(id string,
 
 		// for backwards-compatibility
 		{Key: "custom.nuclio.io/kafka-window-size", ValueInt: &newConfiguration.ackWindowSize},
+
+		// allow changing explicit ack mode via annotation
+		{Key: "nuclio.io/kafka-explicit-ack-mode", ValueString: &explicitAckModeValue},
 	})
 
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to populate configuration from annotations")
 	}
 
-	newConfiguration.WorkerAllocationMode = partitionworker.AllocationMode(workerAllocationModeValue)
-
-	// default explicit ack mode to 'disable'
-	if triggerConfiguration.ExplicitAckMode == "" {
-		newConfiguration.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
+	if err := newConfiguration.populateValuesFromMountedSecrets(logger); err != nil {
+		return nil, errors.Wrap(err, "Failed to populate configuration from secrets")
 	}
 
-	// explicit ack is only allowed for Static Allocation mode
-	if newConfiguration.WorkerAllocationMode != partitionworker.AllocationModeStatic &&
-		functionconfig.ExplicitAckEnabled(triggerConfiguration.ExplicitAckMode) {
-		return nil, errors.New("Explicit ack mode is not allowed when using worker pool allocation mode")
+	if err := newConfiguration.PopulateExplicitAckMode(explicitAckModeValue,
+		triggerConfiguration.ExplicitAckMode); err != nil {
+		return nil, errors.Wrap(err, "Failed to populate explicit ack mode")
 	}
 
 	if ackWindowSizeInterface, ok := newConfiguration.Attributes["ackWindowSize"]; ok {
@@ -310,8 +316,13 @@ func NewConfiguration(id string,
 	// enrich runtime configuration with worker termination timeout
 	runtimeConfiguration.WorkerTerminationTimeout = workerTerminationTimeout
 
-	if newConfiguration.WorkerAllocationMode == "" {
-		newConfiguration.WorkerAllocationMode = partitionworker.AllocationModePool
+	newConfiguration.WorkerAllocationMode = newConfiguration.ResolveWorkerAllocationMode(newConfiguration.WorkerAllocationMode,
+		partitionworker.AllocationMode(workerAllocationModeValue))
+
+	// explicit ack is only allowed for Static Allocation mode
+	if newConfiguration.WorkerAllocationMode != partitionworker.AllocationModeStatic &&
+		functionconfig.ExplicitAckEnabled(newConfiguration.ExplicitAckMode) {
+		return nil, errors.New("Explicit ack mode is not allowed when using worker pool allocation mode")
 	}
 
 	if newConfiguration.RebalanceRetryMax == 0 {
@@ -425,4 +436,37 @@ func (c *Configuration) unflattenCertificate(certificate string) string {
 	}
 
 	return certificate
+}
+
+// populateValuesFromMountedSecrets will populate sensitive configuration fields from mounted secrets, if the field is a path
+func (c *Configuration) populateValuesFromMountedSecrets(logger logger.Logger) error {
+	basePath := ""
+
+	// if secret path is set, use it as the base path for all secrets
+	if c.SecretPath != "" {
+		basePath = c.SecretPath
+	}
+
+	// for each of the sensitive fields, check if it is a path to a file.
+	// if it is, read the file and populate the field with its contents
+	for _, sensitiveField := range []*string{
+		&c.AccessKey,
+		&c.AccessCertificate,
+		&c.CACert,
+		&c.SASL.Password,
+		&c.SASL.OAuth.ClientSecret,
+	} {
+		filePath := filepath.Join(basePath, *sensitiveField)
+
+		// we check if the file exists, because if it doesn't, we assume it's a string and not a path
+		if *sensitiveField != "" && common.FileExists(filePath) {
+			contents, err := os.ReadFile(filePath)
+			if err != nil {
+				return errors.Wrapf(err, "Failed to read file %s", filePath)
+			}
+			*sensitiveField = strings.TrimSpace(string(contents))
+		}
+	}
+
+	return nil
 }

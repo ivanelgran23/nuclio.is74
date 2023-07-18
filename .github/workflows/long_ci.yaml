@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,8 @@ on:
     inputs:
       pr_number:
         description: 'PR number'
-        required: true
+        required: false
+        default: ''
 
 env:
   START_LABEL: long-ci-started
@@ -31,10 +32,20 @@ env:
 
 jobs:
   long_ci:
-    name: PR-${{ github.event.inputs.pr_number }}
+    name: Long CI
     runs-on: ubuntu-latest
     steps:
+      # checkout from development
       - uses: actions/checkout@v3
+        if: github.event.inputs.pr_number == ''
+
+      - if : ${{ github.event.inputs.pr_number != '' }}
+        name: Running on specific PR
+        run: echo "PR number - ${{ github.event.inputs.pr_number }}"
+
+      # checkout from PR
+      - uses: actions/checkout@v3
+        if: github.event.inputs.pr_number != ''
         with:
           fetch-depth: 0
           ref: refs/pull/${{ github.event.inputs.pr_number }}/merge
@@ -49,6 +60,7 @@ jobs:
 
       - name: Set labels
         uses: actions/github-script@v3
+        if: github.event.inputs.pr_number != ''
         env:
           PR_NUMBER: ${{ github.event.inputs.pr_number }}
         with:
@@ -78,7 +90,7 @@ jobs:
         run: echo "LONG_CI_FINISH_LABEL=${{ env.CANCELL_LABEL }}" >> $GITHUB_ENV
 
       - name: Set labels
-        if: ${{ always() }}
+        if: github.event.inputs.pr_number != ''
         uses: actions/github-script@v3
         env:
           PR_NUMBER: ${{ github.event.inputs.pr_number }}

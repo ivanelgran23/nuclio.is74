@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -58,14 +58,13 @@ import (
 )
 
 const (
-	FunctionConfigFileName = "function.yaml"
-	uhttpcImage            = "quay.io/nuclio/uhttpc:0.0.1-%s"
-	GitEntryType           = "git"
-	GithubEntryType        = "github"
-	ArchiveEntryType       = "archive"
-	S3EntryType            = "s3"
-	ImageEntryType         = "image"
-	SourceCodeEntryType    = "sourceCode"
+	uhttpcImage         = "quay.io/nuclio/uhttpc:0.0.1-%s"
+	GitEntryType        = "git"
+	GithubEntryType     = "github"
+	ArchiveEntryType    = "archive"
+	S3EntryType         = "s3"
+	ImageEntryType      = "image"
+	SourceCodeEntryType = "sourceCode"
 )
 
 // holds parameters for things that are required before a runtime can be initialized
@@ -441,10 +440,13 @@ func (b *Builder) initializeSupportedRuntimes() {
 func (b *Builder) readConfiguration() (string, error) {
 
 	if functionConfigPath := b.providedFunctionConfigFilePath(); functionConfigPath != "" {
-		if err := b.readFunctionConfigFile(functionConfigPath); err != nil {
+		functionconfigReader, err := functionconfig.NewReader(b.logger)
+		if err != nil {
+			return "", errors.Wrap(err, "Failed to create functionconfig reader")
+		}
+		if err := functionconfigReader.ReadFunctionConfigFile(functionConfigPath, &b.options.FunctionConfig); err != nil {
 			return "", errors.Wrap(err, "Failed to read function configuration")
 		}
-
 		return functionConfigPath, nil
 	}
 
@@ -461,13 +463,13 @@ func (b *Builder) providedFunctionConfigFilePath() string {
 	// if the user only provided a function file, check if it had a function configuration file
 	// in an inline configuration block (@nuclio.configure)
 	if common.IsFile(b.options.FunctionConfig.Spec.Build.Path) {
-		inlineFunctionConfig, found := b.inlineConfigurationBlock.Contents[FunctionConfigFileName]
+		inlineFunctionConfig, found := b.inlineConfigurationBlock.Contents[common.FunctionConfigFileName]
 		if !found {
 			return ""
 		}
 
 		// create a temporary file containing the contents and return that
-		functionConfigPath, err := b.createTempFileFromYAML(FunctionConfigFileName, inlineFunctionConfig)
+		functionConfigPath, err := b.createTempFileFromYAML(common.FunctionConfigFileName, inlineFunctionConfig)
 
 		b.logger.DebugWith("Function configuration generated from inline", "path", functionConfigPath)
 
@@ -478,7 +480,7 @@ func (b *Builder) providedFunctionConfigFilePath() string {
 		b.logger.WarnWith("Failed to unmarshal inline configuration - ignoring", "err", err)
 	}
 
-	functionConfigPath := filepath.Join(b.options.FunctionConfig.Spec.Build.Path, FunctionConfigFileName)
+	functionConfigPath := filepath.Join(b.options.FunctionConfig.Spec.Build.Path, common.FunctionConfigFileName)
 
 	if !common.FileExists(functionConfigPath) {
 		return ""
@@ -878,7 +880,7 @@ func (b *Builder) getRuntimeName() (string, error) {
 
 		// if the function path is a directory, runtime must be specified in the command-line arguments or configuration
 		if common.IsDir(b.options.FunctionConfig.Spec.Build.Path) {
-			if common.FileExists(path.Join(b.options.FunctionConfig.Spec.Build.Path, FunctionConfigFileName)) {
+			if common.FileExists(path.Join(b.options.FunctionConfig.Spec.Build.Path, common.FunctionConfigFileName)) {
 				return "", errors.New("Build path is directory - function.yaml must specify runtime")
 			}
 
@@ -1086,12 +1088,13 @@ func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 			BuildTimeoutSeconds: b.resolveBuildTimeoutSeconds(),
 
 			// kaniko pod attributes
-			NodeSelector:       b.options.FunctionConfig.Spec.NodeSelector,
-			NodeName:           b.options.FunctionConfig.Spec.NodeName,
-			Affinity:           b.options.FunctionConfig.Spec.Affinity,
-			PriorityClassName:  b.options.FunctionConfig.Spec.PriorityClassName,
-			Tolerations:        b.options.FunctionConfig.Spec.Tolerations,
-			ServiceAccountName: b.options.FunctionConfig.Spec.ServiceAccount,
+			NodeSelector:           b.options.FunctionConfig.Spec.NodeSelector,
+			NodeName:               b.options.FunctionConfig.Spec.NodeName,
+			Affinity:               b.options.FunctionConfig.Spec.Affinity,
+			PriorityClassName:      b.options.FunctionConfig.Spec.PriorityClassName,
+			Tolerations:            b.options.FunctionConfig.Spec.Tolerations,
+			FunctionServiceAccount: b.options.FunctionConfig.Spec.ServiceAccount,
+			BuilderServiceAccount:  b.options.FunctionConfig.Spec.Build.BuilderServiceAccount,
 			ReadinessTimeoutSeconds: b.platform.GetConfig().GetFunctionReadinessTimeoutOrDefault(
 				b.options.FunctionConfig.Spec.ReadinessTimeoutSeconds),
 			SecurityContext: b.options.FunctionConfig.Spec.SecurityContext,

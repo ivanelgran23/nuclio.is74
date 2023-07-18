@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -488,7 +488,11 @@ func (c *Client) resolveGetProjectResponse(detail bool, body []byte) ([]platform
 func (c *Client) logLeaderInternalServerResponseError(ctx context.Context,
 	response *http.Response,
 	errMessage string) {
-	if response.StatusCode >= 500 {
+	if response == nil {
+		c.logger.WarnWithCtx(ctx, "Failed to get response", "errMessage", errMessage)
+		return
+	}
+	if response != nil && response.StatusCode >= 500 {
 		c.logger.WarnWithCtx(ctx,
 			errMessage,
 			"statusCode", response.StatusCode,

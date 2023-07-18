@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -328,6 +328,13 @@ func (sfc *SensitiveFieldsConfig) GetDefaultSensitiveFields() []string {
 		"^/spec/triggers/.+/attributes/accesscertificate$",
 		"^/spec/triggers/.+/attributes/sasl/password$",
 		"^/spec/triggers/.+/attributes/sasl/oauth/clientsecret$",
+		// - kafka annotations
+		"^/metadata/annotations/nuclio.io/kafka-ca-cert$",
+		"^/metadata/annotations/nuclio.io/kafka-access-key$",
+		"^/metadata/annotations/nuclio.io/kafka-access-cert$",
+		"^/metadata/annotations/nuclio.io/kafka-sasl-password$",
+		"^/metadata/annotations/nuclio.io/kafka-sasl-oauth-client-secret$",
+		"^/metadata/annotations/nuclio.io/kafka-sasl-oauth-token-url$",
 	}
 }
 

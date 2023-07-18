@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -153,6 +153,10 @@ spec:
         {{- if .Values.dashboard.kaniko.cacheRepo }}
         - name: NUCLIO_DASHBOARD_KANIKO_CACHE_REPO
           value: {{ .Values.dashboard.kaniko.cacheRepo }}
+        {{- end }}
+        {{- if .Values.dashboard.kaniko.defaultServiceAccount }}
+        - name: NUCLIO_KANIKO_DEFAULT_SERVICE_ACCOUNT
+          value: {{ .Values.dashboard.kaniko.defaultServiceAccount }}
         {{- end }}
         {{- if .Values.registry.runRegistryURL }}
         - name: NUCLIO_DASHBOARD_RUN_REGISTRY_URL

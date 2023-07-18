@@ -1,7 +1,7 @@
 //go:build test_functional || test_unit || test_integration || test_kube || test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/processor/test/suite"
 	"github.com/nuclio/nuclio/test/compare"
@@ -251,7 +252,7 @@ func (suite *TestSuite) SendRequestVerifyResponse(request *Request) bool {
 		decodedLogRecords := []map[string]interface{}{}
 
 		// decode the logs in the header
-		encodedLogs := httpResponse.Header.Get("X-nuclio-logs")
+		encodedLogs := httpResponse.Header.Get(headers.Logs)
 		err := json.Unmarshal([]byte(encodedLogs), &decodedLogRecords)
 		suite.Require().NoError(err)
 
@@ -272,7 +273,7 @@ func (suite *TestSuite) SendRequestVerifyResponse(request *Request) bool {
 		decodedLogRecords := []map[string]interface{}{}
 
 		// decode the logs in the header
-		encodedLogs := httpResponse.Header.Get("X-nuclio-logs")
+		encodedLogs := httpResponse.Header.Get(headers.Logs)
 		err := json.Unmarshal([]byte(encodedLogs), &decodedLogRecords)
 		suite.Require().NoError(err)
 		suite.Require().Equal(len(request.ExpectedLogRecords), len(decodedLogRecords))
@@ -313,7 +314,7 @@ func (suite *TestSuite) sendRequest(request *Request) (*http.Response, error) {
 
 	// if there is a log level, add the header
 	if request.RequestLogLevel != nil {
-		httpRequest.Header.Add("X-nuclio-log-level", *request.RequestLogLevel)
+		httpRequest.Header.Add(headers.LogLevel, *request.RequestLogLevel)
 	}
 
 	// invoke the function

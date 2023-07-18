@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the Licensg.
@@ -684,6 +684,17 @@ func (suite *testSuite) TestResolveFunctionPathGitCodeEntry() {
 				CodeEntryAttributes: map[string]interface{}{
 					"workDir": "go-function",
 					"tag":     "0.0.1",
+				},
+			},
+		},
+		{
+			Name: "AzureDevopsBranchWithDuplicatedProjectName",
+			BuildConfiguration: functionconfig.Build{
+				CodeEntryType: GitEntryType,
+				Path:          "https://sahar920089@dev.azure.com/sahar920089/test-nuclio-cet/_git/test-nuclio-cet",
+				CodeEntryAttributes: map[string]interface{}{
+					"workDir": "go-function",
+					"branch":  "go-func",
 				},
 			},
 		},

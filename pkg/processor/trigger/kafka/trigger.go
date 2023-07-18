@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/errgroup"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
@@ -301,6 +302,11 @@ func (k *kafka) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.C
 
 	k.Logger.DebugWith("Claim consumption stopped", "partition", claim.Partition())
 
+	// unsubscribe channel from the streamAck control message kind before closing it
+	if err := k.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
+		k.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+	}
+
 	// shut down goroutines and channels
 	close(submittedEventChan)
 	close(explicitAckControlMessageChan)
@@ -327,11 +333,12 @@ func (k *kafka) eventSubmitter(claim sarama.ConsumerGroupClaim, submittedEventCh
 		switch k.configuration.ExplicitAckMode {
 		case functionconfig.ExplicitAckModeEnable:
 
+			// decide whether to ack or not based on the `StreamNoAck` header
 			if err := k.resolveNoAckMessage(response, submittedEvent); err != nil {
 				processErr = err
 			}
 
-			// indicate that we're done
+			// pass the result
 			submittedEvent.done <- processErr
 
 		case functionconfig.ExplicitAckModeDisable:
@@ -339,10 +346,14 @@ func (k *kafka) eventSubmitter(claim sarama.ConsumerGroupClaim, submittedEventCh
 			// indicate that we're done
 			submittedEvent.done <- processErr
 
-		// also includes ExplicitAckModeExplicitOnly
+		case functionconfig.ExplicitAckModeExplicitOnly:
+
+			// we always return an error so the offset will only be marked by the explicit ack handler
+			submittedEvent.done <- processor.StreamNoAckError{}
 		default:
 
-			// ignore response
+			// we should not get here, but just in case
+			submittedEvent.done <- processErr
 		}
 	}
 
@@ -595,7 +606,7 @@ func (k *kafka) resolveNoAckMessage(response interface{}, submittedEvent *submit
 	}
 
 	// check response header for no-ack
-	if noAckHeader, exists := responseHeaders["x-nuclio-stream-no-ack"]; exists {
+	if noAckHeader, exists := responseHeaders[headers.StreamNoAck]; exists {
 
 		// convert header to boolean
 		if noAckHeaderBool, ok := noAckHeader.(bool); ok && noAckHeaderBool {

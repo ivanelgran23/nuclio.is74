@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 #
 
 ARG NUCLIO_DOCKER_IMAGE_TAG
-ARG ALPINE_IMAGE=gcr.io/iguazio/alpine:3.17
+ARG ALPINE_IMAGE
 ARG NUCLIO_DOCKER_REPO
 
 FROM $NUCLIO_DOCKER_REPO/nuclio-builder:$NUCLIO_DOCKER_IMAGE_TAG as build-controller
@@ -25,8 +25,6 @@ FROM $NUCLIO_DOCKER_REPO/nuclio-builder:$NUCLIO_DOCKER_IMAGE_TAG as build-contro
 ARG NUCLIO_GO_LINK_FLAGS_INJECT_VERSION
 
 RUN go build \
-    -a \
-    -installsuffix cgo \
     -ldflags="${NUCLIO_GO_LINK_FLAGS_INJECT_VERSION}" \
     -o controller cmd/controller/main.go
 

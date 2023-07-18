@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,12 +19,14 @@ limitations under the License.
 package httpsuite
 
 import (
+	"encoding/base64"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/platform"
 
@@ -68,7 +70,7 @@ func (suite *HTTPTestSuite) TestCORS() {
 				RequestHeaders: map[string]interface{}{
 					"Origin":                         origin,
 					"Access-Control-Request-Method":  http.MethodPost,
-					"Access-Control-Request-Headers": "X-nuclio-log-level",
+					"Access-Control-Request-Headers": headers.LogLevel,
 				},
 				ExpectedResponseStatusCode: &validPreflightResponseStatusCode,
 				ExpectedResponseHeadersValues: map[string][]string{
@@ -137,6 +139,35 @@ func (suite *HTTPTestSuite) TestMaxRequestBodySize() {
 				RequestMethod:              "POST",
 				RequestBody:                string(make([]byte, maxRequestBodySize+1)),
 				ExpectedResponseStatusCode: &statusBadRequest,
+			},
+		})
+}
+
+func (suite *HTTPTestSuite) TestProcessErrorResponse() {
+
+	// create a function which returns a faulty content type in the response
+	functionSourceCode := `import nuclio_sdk
+
+def handler(context, event):
+	return nuclio_sdk.Response(
+		body=str(123),
+		headers={},
+		content_type=123,
+		status_code=200,
+	)
+`
+	createFunctionOptions := suite.getHTTPDeployOptions()
+	createFunctionOptions.FunctionConfig.Spec.Handler = "main:handler"
+	createFunctionOptions.FunctionConfig.Spec.Build.Path = ""
+	createFunctionOptions.FunctionConfig.Spec.Build.FunctionSourceCode = base64.StdEncoding.EncodeToString([]byte(functionSourceCode))
+
+	statusInternalServerError := http.StatusInternalServerError
+	suite.DeployFunctionAndRequests(createFunctionOptions,
+		[]*Request{
+			{
+				RequestMethod:              "GET",
+				ExpectedResponseStatusCode: &statusInternalServerError,
+				ExpectedResponseBody:       "json: cannot unmarshal number into Go struct field result.content_type of type string",
 			},
 		})
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 
 	"github.com/nuclio/nuclio/pkg/cmdrunner"
 	"github.com/nuclio/nuclio/pkg/common"
+	nucliocontext "github.com/nuclio/nuclio/pkg/context"
 	"github.com/nuclio/nuclio/pkg/processor/build/runtime"
 
 	"github.com/nuclio/errors"
@@ -115,8 +116,13 @@ func (k *Kaniko) BuildAndPushContainerImage(ctx context.Context,
 
 	// Cleanup after 30 minutes, allowing to dev to inspect job / pod information before getting deleted
 	defer time.AfterFunc(k.builderConfiguration.JobDeletionTimeout, func() {
-		if err := k.deleteJob(ctx, namespace, job.Name); err != nil {
-			k.logger.WarnWithCtx(ctx, "Failed to delete job", "err", err.Error())
+
+		// Create a detached context to avoid cancellation of the deletion process
+		detachedCtx := nucliocontext.NewDetached(ctx)
+		if err := k.deleteJob(detachedCtx, namespace, job.Name); err != nil {
+			k.logger.WarnWithCtx(ctx,
+				"Failed to delete job",
+				"err", err.Error())
 		}
 	})
 
@@ -281,6 +287,8 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 	assetsURL := fmt.Sprintf("http://%s:8070/kaniko/%s", os.Getenv("NUCLIO_DASHBOARD_DEPLOYMENT_NAME"), bundleFilename)
 	getAssetCommand := fmt.Sprintf("while true; do wget -T 5 -c %s -P %s && break; done", assetsURL, tmpFolderVolumeMount.MountPath)
 
+	serviceAccount := k.resolveServiceAccount(buildOptions)
+
 	kanikoJobSpec := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -377,7 +385,7 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 					Affinity:           buildOptions.Affinity,
 					PriorityClassName:  buildOptions.PriorityClassName,
 					Tolerations:        buildOptions.Tolerations,
-					ServiceAccountName: buildOptions.ServiceAccountName,
+					ServiceAccountName: serviceAccount,
 				},
 			},
 		},
@@ -642,7 +650,8 @@ func (k *Kaniko) resolveFailFast(ctx context.Context,
 			if err != nil {
 				k.logger.WarnWithCtx(ctx,
 					"Failed to get kaniko job pod",
-					"jobName", jobName)
+					"jobName", jobName,
+					"err", err.Error())
 				time.Sleep(5 * time.Second)
 
 				// skip in case job hasn't started yet. it will fail on timeout if getJobPod keeps failing.
@@ -745,6 +754,12 @@ func (k *Kaniko) deleteJob(ctx context.Context, namespace string, jobName string
 	if err := k.kubeClientSet.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
 		PropagationPolicy: &propagationPolicy,
 	}); err != nil {
+		k.logger.WarnWithCtx(ctx,
+			"Failed to delete kaniko job",
+			"namespace", namespace,
+			"job", jobName,
+			"error", err.Error(),
+		)
 		return errors.Wrap(err, "Failed to delete job")
 	}
 	k.logger.DebugWithCtx(ctx, "Successfully deleted job", "namespace", namespace, "job", jobName)
@@ -757,4 +772,18 @@ func (k *Kaniko) matchECRUrl(registryURL string) bool {
 
 func (k *Kaniko) resolveAWSRegionFromECR(registryURL string) string {
 	return strings.Split(registryURL, ".")[3]
+}
+
+func (k *Kaniko) resolveServiceAccount(buildOptions *BuildOptions) string {
+
+	// if a builder service account is provided in build options, use it.
+	if buildOptions.BuilderServiceAccount != "" {
+		return buildOptions.BuilderServiceAccount
+	}
+	// otherwise, if default service account is provided in builder configuration, use it.
+	if k.builderConfiguration.DefaultServiceAccount != "" {
+		return k.builderConfiguration.DefaultServiceAccount
+	}
+	// otherwise, use function service account.
+	return buildOptions.FunctionServiceAccount
 }

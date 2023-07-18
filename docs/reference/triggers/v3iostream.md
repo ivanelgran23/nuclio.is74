@@ -92,7 +92,7 @@ One example are stateful functions that might need to go and consume already bei
 For that, Nuclio offers a way to accept new events without committing them, and explicitly mark offsets on the relevant stream shard, when the processing is done.
 This enables the function to receive and process more events simultaneously.
 
-To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enabled` or `explicitOnly`, where the optional modes are:
+To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enable` or `explicitOnly`, where the optional modes are:
 * `enable` - allows explicit and implicit ack according to the "x-nuclio-stream-no-ack" header
 * `disable`- disables the explicit ack feature and allows only implicit acks (default)
 * `explicitOnly`- allows only explicit acks and disables implicit acks
@@ -112,14 +112,9 @@ qualified_offset = nuclio.QualifiedOffset.from_event(event)
 await context.platform.explicit_ack(qualified_offset)
 ```
 
-During [rebalance](#rebalancing), the function can still be processing events. We can register a callback to drop or commit events being handled when the rebalancing is about to happen, using the following method:
-```py
-context.platform.on_signal(callback)
-```
-
 **NOTES**:
-* Currently, the explicit ack feature is only available for python runtime and function that have a Kafka trigger.
-* The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/kafka-worker-allocation-mode":"static"`.
+* Currently, the explicit ack feature is only available for python runtime and functions that have a stream trigger (kafka/v3io).
+* The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/v3iostream-worker-allocation-mode":"static"`.
 * The `QualifiedOffset` object can be saved in a persistent storage and used to commit the offset on later invocation of the function.
 * The call to the `explicit_ack()` method must be awaited, meaning the handler must be an async function, or provide an event loop to run that method. e.g.:
 ```py
