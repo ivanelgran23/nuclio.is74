@@ -16,18 +16,33 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import socket
 import sys
 import time
 import traceback
 
+import elasticapm
 import msgpack
 import nuclio_sdk
 import nuclio_sdk.helpers
 import nuclio_sdk.json_encoder
 import nuclio_sdk.logger
+import strtobool
+from dotenv import load_dotenv
+from elasticapm.conf.constants import OUTCOME
 
+load_dotenv()
+
+apm_client = elasticapm.Client(
+    service_name="nuclio",
+    server_url=os.getenv("APM_SERVER_URL"),
+    secret_token=os.getenv("APM_SECRET_TOKEN"),
+    environment=os.getenv("APM_ENVIRONMENT"),
+    global_labels="application=assistant",
+)
+elasticapm.instrument()
 
 class Constants:
 
@@ -135,6 +150,8 @@ class Wrapper(object):
                     # handle event
                     await self._handle_event(event)
                 except BaseException as exc:
+                    elasticapm.set_transaction_result(OUTCOME.FAILURE)
+                    elasticapm.get_client().capture_exception()
                     await self._on_handle_event_error(exc)
 
             except WrapperFatalException as exc:
